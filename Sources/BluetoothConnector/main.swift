@@ -1,6 +1,35 @@
 import IOBluetooth
 import ArgumentParser
 
+protocol BluetoothAddressedDevice: AnyObject {
+    var bluetoothAddress: String? { get }
+}
+
+extension IOBluetoothDevice: BluetoothAddressedDevice {
+    var bluetoothAddress: String? { addressString }
+}
+
+func normalizedMacAddress(_ address: String) -> String {
+    address.lowercased()
+}
+
+func resolveBluetoothDevice<Device: BluetoothAddressedDevice>(
+    macAddress: String,
+    pairedDevices: [Device],
+    deviceFactory: (String) -> Device?
+) -> Device? {
+    let normalizedAddress = normalizedMacAddress(macAddress)
+
+    if let pairedDevice = pairedDevices.first(where: {
+        guard let address = $0.bluetoothAddress else { return false }
+        return normalizedMacAddress(address) == normalizedAddress
+    }) {
+        return pairedDevice
+    }
+
+    return deviceFactory(normalizedAddress)
+}
+
 func utilityName() -> String {
   return URL(fileURLWithPath: CommandLine.arguments.first ?? "¯\\_(ツ)_/¯").lastPathComponent
 }
@@ -64,8 +93,24 @@ enum ActionType {
     case Disconnect
 }
 
+func actionSucceeded(action: ActionType, error: IOReturn, isConnected: Bool) -> Bool {
+    guard error == kIOReturnSuccess else { return false }
+
+    switch action {
+        case .Connection:
+            return isConnected
+        case .Disconnect:
+            return !isConnected
+    }
+}
+
 func execute(macAddress: String, connectOnly: Bool, disconnectOnly: Bool, notify: Bool, statusOnly: Bool) {
-    guard let bluetoothDevice = IOBluetoothDevice(addressString: macAddress) else {
+    let pairedDevices = IOBluetoothDevice.pairedDevices().compactMap { $0 as? IOBluetoothDevice }
+    guard let bluetoothDevice = resolveBluetoothDevice(
+        macAddress: macAddress,
+        pairedDevices: pairedDevices,
+        deviceFactory: { IOBluetoothDevice(addressString: $0) }
+    ) else {
         printAndNotify(title: utilityName(), body: "Device not found", notify: notify)
         exit(-2)
     }
@@ -89,12 +134,14 @@ func execute(macAddress: String, connectOnly: Bool, disconnectOnly: Bool, notify
         exit(0)
     }
 
-    var error : IOReturn = -1
+    var error : IOReturn = kIOReturnSuccess
     var action : ActionType
     if shouldConnect {
         action = .Connection
-        turnOnBluetoothIfNeeded(notify: notify)
-        error = bluetoothDevice.openConnection()
+        if !alreadyConnected {
+            turnOnBluetoothIfNeeded(notify: notify)
+            error = bluetoothDevice.openConnection()
+        }
     }
     else {
         action = .Disconnect
@@ -109,7 +156,7 @@ func execute(macAddress: String, connectOnly: Bool, disconnectOnly: Bool, notify
     }
 
     let title = bluetoothDevice.name ?? utilityName()
-    if error > 0 {
+    if !actionSucceeded(action: action, error: error, isConnected: bluetoothDevice.isConnected()) {
         printAndNotify(title: title, body: "\(action) failed", notify: notify)
         exit(-1)
     } else if notify {
